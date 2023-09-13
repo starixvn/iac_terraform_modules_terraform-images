@@ -1,0 +1,529 @@
+---
+workflow:
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH && $CI_COMMIT_REF_PROTECTED == 'true'
+
+include:
+  - project: "gitlab-org/quality/pipeline-common"
+    file:
+      - "/ci/danger-review.yml"
+
+variables:
+  BASE_IMAGE: "alpine:3.18.3"
+  BUILD_IMAGE_NAME: "$CI_REGISTRY_IMAGE/branches/$CI_COMMIT_REF_SLUG-$TERRAFORM_VERSION:$CI_COMMIT_SHA"
+  BUILDX_VERSION: "0.11.2"
+  DOCKER_BUILDKIT: "1"
+  DOCKER_DIND_IMAGE: "docker:24.0.6-dind"
+  NODE_IMAGE: "node:lts-slim"
+  PLATFORMS: linux/amd64,linux/arm64
+  RELEASE_IMAGE_NAME: "$CI_REGISTRY_IMAGE/releases/$TERRAFORM_VERSION"
+  STABLE_IMAGE_NAME: "$CI_REGISTRY_IMAGE/stable:latest"
+  STABLE_VERSION: "1.5"
+  TF_STATE_NAME: ci-$CI_JOB_ID
+
+.versions:
+  parallel:
+    matrix:
+      - TERRAFORM_BINARY_VERSION: "1.5.5"
+        TERRAFORM_VERSION: "1.5"
+      - TERRAFORM_BINARY_VERSION: "1.4.6"
+        TERRAFORM_VERSION: "1.4"
+      - TERRAFORM_BINARY_VERSION: "1.3.9"
+        TERRAFORM_VERSION: "1.3"
+      - TERRAFORM_BINARY_VERSION: "1.2.9"
+        TERRAFORM_VERSION: "1.2"
+      - TERRAFORM_BINARY_VERSION: "1.1.9"
+        TERRAFORM_VERSION: "1.1"
+
+stages:
+  - lint
+  - build
+  - test-integration
+  - test-init
+  - test-fmt
+  - test-validate
+  - test-plan
+  - test-apply
+  - test-destroy
+  - test-misc
+  - prepare-release
+  - release
+  - upload-test-module
+
+danger-review:
+  stage: lint
+
+shell check:
+  stage: lint
+  image: koalaman/shellcheck-alpine:v0.9.0
+  before_script:
+    - shellcheck --version
+  script:
+    - shellcheck src/**/*.sh scripts/*.sh
+
+commit lint:
+  stage: lint
+  needs: []
+  image: "$NODE_IMAGE"
+  cache:
+    key:
+      files:
+        - package.json
+    paths:
+      - node_modules
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends git-core ca-certificates
+    - npm install
+  script:
+    - npx commitlint --from $CI_MERGE_REQUEST_DIFF_BASE_SHA --to HEAD --help-url 'https://gitlab.com/gitlab-org/terraform-images/-/blob/master/CONTRIBUTING.md'
+  rules:
+    - if: "$CI_MERGE_REQUEST_EVENT_TYPE != 'merge_train' && $CI_MERGE_REQUEST_IID"
+
+dockerfile check:
+  stage: lint
+  image: hadolint/hadolint:latest-alpine
+  before_script:
+    - hadolint --version
+  script:
+    - hadolint Dockerfile
+
+build:
+  extends: .versions
+  stage: build
+  services:
+    - "$DOCKER_DIND_IMAGE"
+  image: "$DOCKER_DIND_IMAGE"
+  before_script:
+    # Install buildx
+    - mkdir -p ~/.docker/cli-plugins
+    - wget "https://github.com/docker/buildx/releases/download/v$BUILDX_VERSION/buildx-v$BUILDX_VERSION.linux-amd64" -O ~/.docker/cli-plugins/docker-buildx
+    - chmod a+x ~/.docker/cli-plugins/docker-buildx
+    # See https://www.docker.com/blog/multi-platform-docker-builds/
+    - docker run --rm --privileged docker/binfmt:a7996909642ee92942dcd6cff44b9b95f08dad64
+    # Registry auth
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  script:
+    - docker buildx create --use
+    # NOTE: we disable provenance for now
+    # because it causes troubles with the registry and older clients.
+    # See
+    # - https://gitlab.com/gitlab-org/terraform-images/-/issues/104
+    # - https://gitlab.com/gitlab-org/terraform-images/-/merge_requests/184#note_1328485943
+    - docker buildx build
+      --platform "$PLATFORMS"
+      --build-arg BASE_IMAGE=$BASE_IMAGE
+      --build-arg TERRAFORM_BINARY_VERSION=$TERRAFORM_BINARY_VERSION
+      --file Dockerfile
+      --tag "$BUILD_IMAGE_NAME"
+      --provenance=false
+      --push
+      .
+
+upload:
+  stage: upload-test-module
+  script:
+    - cd tests/modules/random-pet
+    - tar -cvzf ${CI_PROJECT_NAME}-local-${TERRAFORM_MODULE_VERSION}.tgz -C ${CI_PROJECT_DIR} .
+    - 'curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file ${CI_PROJECT_NAME}-local-${TERRAFORM_MODULE_VERSION}.tgz ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/terraform/modules/random-pet/local/${TERRAFORM_MODULE_VERSION}/file'
+  variables:
+    TERRAFORM_MODULE_VERSION: 0.0.1
+  rules:
+    - if: '$CI_PROJECT_PATH == "gitlab-org/terraform-images" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+
+.test-base:
+  image: "$BUILD_IMAGE_NAME"
+  before_script:
+    - gitlab-terraform version
+    - jq --version
+  cache:
+    key: "$TERRAFORM_VERSION-$CI_COMMIT_REF_SLUG"
+    paths:
+      - tests/.terraform/
+
+.test:
+  extends:
+    - .test-base
+  before_script:
+    - !reference [.test-base, before_script]
+    - cd tests
+
+.test-tf-root:
+  extends:
+    - .test-base
+  variables:
+    TF_ROOT: tests
+
+test-init:
+  extends:
+    - .test
+    - .versions
+  stage: test-init
+  script:
+    - export DEBUG_OUTPUT=true
+    - gitlab-terraform init
+
+test-init-with-args:
+  extends:
+    - .test
+    - .versions
+  stage: test-init
+  script:
+    - export DEBUG_OUTPUT=true
+    - gitlab-terraform init -get=true -no-color
+
+test-init-with-flags:
+  extends:
+    - .test
+    - .versions
+  stage: test-init
+  script:
+    - export DEBUG_OUTPUT=true
+    - export TF_INIT_FLAGS="-get=true -no-color"
+    - gitlab-terraform init
+
+test-init-with-flags-and-args:
+  extends:
+    - .test
+    - .versions
+  stage: test-init
+  script:
+    - export DEBUG_OUTPUT=true
+    - export TF_INIT_FLAGS="-get=true"
+    - gitlab-terraform init -no-color
+
+test-init-tf-root:
+  extends:
+    - .test-tf-root
+    - .versions
+  stage: test-init
+  script:
+    - export DEBUG_OUTPUT=true
+    - gitlab-terraform init
+
+test-init-tf-root-with-cd:
+  extends:
+    - .test-tf-root
+    - .versions
+  stage: test-init
+  script:
+    - cd tests
+    - export DEBUG_OUTPUT=true
+    - gitlab-terraform init
+
+test-init-tf-root-with-args:
+  extends:
+    - .test-tf-root
+    - .versions
+  stage: test-init
+  script:
+    - export DEBUG_OUTPUT=true
+    - gitlab-terraform init -get=true -no-color
+
+test-init-tf-root-with-flags:
+  extends:
+    - .test-tf-root
+    - .versions
+  stage: test-init
+  script:
+    - export DEBUG_OUTPUT=true
+    - export TF_INIT_FLAGS="-get=true -no-color"
+    - gitlab-terraform init
+
+test-init-tf-root-with-flags-and-args:
+  extends:
+    - .test-tf-root
+    - .versions
+  stage: test-init
+  script:
+    - export DEBUG_OUTPUT=true
+    - export TF_INIT_FLAGS="-get=true"
+    - gitlab-terraform init -no-color
+
+test-init-without-reconfigure:
+  extends:
+    - .test-tf-root
+    - .versions
+  stage: test-init
+  script:
+    - gitlab-terraform init
+    - |
+      cat <<EOF > $TF_ROOT/backend_override.tf
+      terraform {
+        backend "local" {}
+      }
+      EOF
+    - export TF_INIT_NO_RECONFIGURE=true
+    - FAILED=false
+    - gitlab-terraform init -no-color >/tmp/output.txt 2>&1 || FAILED=true
+    - cat /tmp/output.txt
+    - test $FAILED = true
+    - 'cat /tmp/output.txt | grep "Error: Backend configuration changed"'
+
+test-init-with-reconfigure:
+  extends:
+    - .test-tf-root
+    - .versions
+  stage: test-init
+  script:
+    - gitlab-terraform init
+    - |
+      cat <<EOF > $TF_ROOT/backend_override.tf
+      terraform {
+        backend "local" {}
+      }
+      EOF
+    - gitlab-terraform init
+
+test-init-with-prepared-registry-token:
+  extends:
+    - .test
+  stage: test-init
+  variables:
+    TERRAFORM_VERSION: $STABLE_VERSION
+  script:
+    - apk add --update $PKG
+    - |
+      cat <<'EOF' > test.sh
+      set -x
+      export TF_TOKEN_gitlab_com=mysecrettoken
+      . $(which gitlab-terraform)
+      terraform_authenticate_private_registry
+      test "$TF_TOKEN_gitlab_com" = "mysecrettoken"
+      EOF
+    - $SHELL test.sh
+  parallel:
+    matrix:
+      - SHELL: "bash"
+        PKG: "bash"
+      - SHELL: "zsh"
+        PKG: "zsh"
+      - SHELL: "ksh"
+        PKG: "loksh"
+
+test-init-without-prepared-registry-token:
+  extends:
+    - .test
+  stage: test-init
+  variables:
+    TERRAFORM_VERSION: $STABLE_VERSION
+  script:
+    - apk add --update $PKG
+    - |
+      cat <<'EOF' > test.sh
+      set -x
+      . $(which gitlab-terraform)
+      terraform_authenticate_private_registry
+      test -n "$TF_TOKEN_gitlab_com"
+      EOF
+    - $SHELL test.sh
+  parallel:
+    matrix:
+      - SHELL: "bash"
+        PKG: "bash"
+      - SHELL: "zsh"
+        PKG: "zsh"
+      - SHELL: "ksh"
+        PKG: "loksh"
+
+test-fmt:
+  extends:
+    - .test
+    - .versions
+  stage: test-fmt
+  script:
+    - gitlab-terraform fmt
+
+test-validate:
+  extends:
+    - .test
+    - .versions
+  stage: test-validate
+  script:
+    - gitlab-terraform validate
+
+test-plan:
+  extends:
+    - .test
+    - .versions
+  stage: test-plan
+  variables:
+    TF_PLAN_CACHE: $TERRAFORM_VERSION-plan.cache
+  script:
+    - gitlab-terraform plan
+    - if [[ ! -f "$TERRAFORM_VERSION-plan.cache" ]]; then echo "expected to find a plan.cache file"; exit 1; fi
+    - gitlab-terraform plan-json
+    - if [[ ! -f "plan.json" ]]; then echo "expected to find a plan.json file"; exit 1; fi
+  artifacts:
+    paths:
+      - "tests/*-plan.cache"
+
+test-apply:
+  extends:
+    - .test
+    - .versions
+  stage: test-apply
+  variables:
+    TF_PLAN_CACHE: $TERRAFORM_VERSION-plan.cache
+  script:
+    - gitlab-terraform apply
+
+test-destroy:
+  extends:
+    - .test
+    - .versions
+  stage: test-destroy
+  script:
+    - gitlab-terraform destroy
+
+test-source-script:
+  extends:
+    - .test
+  stage: test-misc
+  needs: [build]
+  variables:
+    TERRAFORM_VERSION: $STABLE_VERSION
+  before_script:
+    - !reference [.test-base, before_script]
+    - apk add --update $PKG
+  script:
+    - |
+      cat <<'EOF' > test.sh
+      set -x
+      test -z "$TF_GITLAB_SOURCED"
+      . $(which gitlab-terraform)
+      test $TF_GITLAB_SOURCED
+      EOF
+    - |
+      mkdir /usr/local/sbin
+      cat <<'EOF' > /usr/local/sbin/terraform
+      #/!usr/bin/env sh -e
+      echo "Called Terraform, but shouldn't have!!"
+      false
+      EOF
+      chmod +x /usr/local/sbin/terraform
+    - $SHELL test.sh
+  parallel:
+    matrix:
+      - SHELL: "bash"
+        PKG: "bash"
+      - SHELL: "zsh"
+        PKG: "zsh"
+      - SHELL: "ksh"
+        PKG: "loksh"
+
+test-without-implicit-init:
+  extends:
+    - .test
+  stage: test-misc
+  needs: [build]
+  cache:
+  variables:
+    TERRAFORM_VERSION: $STABLE_VERSION
+    STATE_NAME: $CI_JOB_NAME
+  script:
+    - export TF_IMPLICIT_INIT=false
+    - FAILED=false
+    - gitlab-terraform $CMD -no-color >/tmp/output.txt 2>&1 || FAILED=true
+    - cat /tmp/output.txt
+    - test $FAILED = true
+    - 'cat /tmp/output.txt | grep "$ERROR"'
+  parallel:
+    matrix:
+      - CMD: apply
+        ERROR: 'Error: Failed to load "plan.cache" as a plan'
+      - CMD: destroy
+        ERROR: 'Error: Backend initialization required, please run "terraform init"'
+      - CMD: plan
+        ERROR: 'Error: Backend initialization required, please run "terraform init"'
+      - CMD: validate
+        ERROR: 'Run "terraform init" to install all modules'
+
+test-no-wrapper:
+  extends:
+    - .test
+  stage: test-misc
+  needs: [build]
+  cache:
+  variables:
+    TERRAFORM_VERSION: $STABLE_VERSION
+    STATE_NAME: $CI_JOB_NAME
+  script:
+    # NOTE: running `gitlab-terraform apply` wouldn't fail
+    #       because of the implicit `terraform init`.
+    - FAILED=false
+    - gitlab-terraform -- apply -no-color >/tmp/output.txt 2>&1 || FAILED=true
+    - cat /tmp/output.txt
+    - test $FAILED = true
+    - 'cat /tmp/output.txt | grep "Error: Backend initialization required, please run \"terraform init\""'
+
+integration-test-template:
+  stage: test-integration
+  variables:
+    TERRAFORM_VERSION: $STABLE_VERSION
+    TF_STATE_NAME: ci-integration-test-template-$CI_PIPELINE_IID-$CI_NODE_INDEX
+    TF_CACHE_KEY: default
+    TF_ROOT: tests
+  trigger:
+    include: .gitlab/integration-test/Test-$TEMPLATE
+    strategy: depend
+  rules:
+    - if: '$CI_PROJECT_PATH == "gitlab-org/terraform-images"'
+    - if: '$CI_MERGE_REQUEST_EVENT_TYPE == "merge_train"'
+  parallel:
+    matrix:
+      - TEMPLATE: [Terraform.gitlab-ci.yml, Terraform.latest.gitlab-ci.yml]
+
+release:
+  extends: .versions
+  stage: release
+  image:
+    name: gcr.io/go-containerregistry/crane:debug
+    entrypoint: [""]
+  script:
+    # https://github.com/google/go-containerregistry/blob/main/cmd/crane/doc/crane_copy.md
+    - crane auth login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - crane copy "$BUILD_IMAGE_NAME" "$RELEASE_IMAGE_NAME:latest"
+    - crane copy "$BUILD_IMAGE_NAME" "$CI_REGISTRY_IMAGE/releases/terraform:$TERRAFORM_BINARY_VERSION"
+    - crane copy "$BUILD_IMAGE_NAME" "$RELEASE_IMAGE_NAME:$CI_COMMIT_TAG"
+    - if [ "$TERRAFORM_VERSION" = "$STABLE_VERSION" ]; then crane copy "$BUILD_IMAGE_NAME" "$STABLE_IMAGE_NAME"; fi
+  rules:
+    - if: $CI_COMMIT_TAG
+
+.semantic-release:
+  image: "$NODE_IMAGE"
+  stage: prepare-release
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends git-core ca-certificates
+    - npm install -g semantic-release @semantic-release/gitlab
+  script:
+    - semantic-release $DRY_RUN_OPT -b $CI_COMMIT_REF_NAME
+
+tag_release-dryrun:
+  extends: .semantic-release
+  variables:
+    DRY_RUN_OPT: "-d"
+  rules:
+    - if: '$CI_PROJECT_PATH == "gitlab-org/terraform-images" && $CI_MERGE_REQUEST_IID'
+
+tag_release:
+  extends: .semantic-release
+  rules:
+    - if: '$CI_PROJECT_PATH == "gitlab-org/terraform-images" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+cleanup_tf_states:
+  image: alpine:latest
+  stage: test-destroy
+  variables:
+    REMOVE_STATES_UNTIL: 1 week ago
+    GITLAB_TOKEN: $GL_PURGE_STATE_TOKEN
+  before_script:
+    - apk add --update coreutils curl jq
+    - export FETCH_OLDER_THAN=$(date '+%Y-%m-%dT%H:%M:%SZ' -d "${REMOVE_STATES_UNTIL}")
+  script:
+    - echo "Going to remove Terraform States older than '$FETCH_OLDER_THAN'"
+    - ./scripts/fetch-states.sh | sed -n '1d;p' | ./scripts/remove-states.sh
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "schedule"'

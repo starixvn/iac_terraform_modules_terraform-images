@@ -1,0 +1,32 @@
+workflow:
+  rules:
+    - if: '$CI_PROJECT_PATH == "gitlab-org/terraform-images"'
+
+include:
+  - template: Terraform.latest.gitlab-ci.yml
+
+default:
+  image: "$BUILD_IMAGE_NAME"
+
+.run-always:
+  rules:
+    - when: always
+
+fmt:
+  rules: !reference [.run-always, rules]
+
+validate:
+  rules: !reference [.run-always, rules]
+
+build:
+  rules: !reference [.run-always, rules]
+
+# The `terraform apply` should always happen for the integration tests.
+# This prevents stalled manual pipelines, but more importantly tests
+# the `apply` wrapper.
+deploy:
+  rules: !reference [.run-always, rules]
+
+destroy:
+  extends: .terraform:destroy
+  rules: !reference [.run-always, rules]
