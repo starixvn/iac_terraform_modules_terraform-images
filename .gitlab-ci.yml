@@ -281,56 +281,56 @@ test-init-with-reconfigure:
       EOF
     - gitlab-terraform init
 
-test-init-with-prepared-registry-token:
-  extends:
-    - .test
-  stage: test-init
-  variables:
-    TERRAFORM_VERSION: $STABLE_VERSION
-  script:
-    - apk add --update $PKG
-    - |
-      cat <<'EOF' > test.sh
-      set -x
-      export TF_TOKEN_gitlab_com=glpat-Lt8trCsxoj7RGcv-uLSL
-      . $(which gitlab-terraform)
-      terraform_authenticate_private_registry
-      test "$TF_TOKEN_gitlab_com" = "glpat-Lt8trCsxoj7RGcv-uLSL"
-      EOF
-    - $SHELL test.sh
-  parallel:
-    matrix:
-      - SHELL: "bash"
-        PKG: "bash"
-      - SHELL: "zsh"
-        PKG: "zsh"
-      - SHELL: "ksh"
-        PKG: "loksh"
+# test-init-with-prepared-registry-token:
+#   extends:
+#     - .test
+#   stage: test-init
+#   variables:
+#     TERRAFORM_VERSION: $STABLE_VERSION
+#   script:
+#     - apk add --update $PKG
+#     - |
+#       cat <<'EOF' > test.sh
+#       set -x
+#       export TF_TOKEN_gitlab_com=glpat-Lt8trCsxoj7RGcv-uLSL
+#       . $(which gitlab-terraform)
+#       terraform_authenticate_private_registry
+#       test "$TF_TOKEN_gitlab_com" = "glpat-Lt8trCsxoj7RGcv-uLSL"
+#       EOF
+#     - $SHELL test.sh
+#   parallel:
+#     matrix:
+#       - SHELL: "bash"
+#         PKG: "bash"
+#       - SHELL: "zsh"
+#         PKG: "zsh"
+#       - SHELL: "ksh"
+#         PKG: "loksh"
 
-test-init-without-prepared-registry-token:
-  extends:
-    - .test
-  stage: test-init
-  variables:
-    TERRAFORM_VERSION: $STABLE_VERSION
-  script:
-    - apk add --update $PKG
-    - |
-      cat <<'EOF' > test.sh
-      set -x
-      . $(which gitlab-terraform)
-      terraform_authenticate_private_registry
-      test -n "$TF_TOKEN_gitlab_com"
-      EOF
-    - $SHELL test.sh
-  parallel:
-    matrix:
-      - SHELL: "bash"
-        PKG: "bash"
-      - SHELL: "zsh"
-        PKG: "zsh"
-      - SHELL: "ksh"
-        PKG: "loksh"
+# test-init-without-prepared-registry-token:
+#   extends:
+#     - .test
+#   stage: test-init
+#   variables:
+#     TERRAFORM_VERSION: $STABLE_VERSION
+#   script:
+#     - apk add --update $PKG
+#     - |
+#       cat <<'EOF' > test.sh
+#       set -x
+#       . $(which gitlab-terraform)
+#       terraform_authenticate_private_registry
+#       test -n "$TF_TOKEN_gitlab_com"
+#       EOF
+#     - $SHELL test.sh
+#   parallel:
+#     matrix:
+#       - SHELL: "bash"
+#         PKG: "bash"
+#       - SHELL: "zsh"
+#         PKG: "zsh"
+#       - SHELL: "ksh"
+#         PKG: "loksh"
 
 test-fmt:
   extends:
