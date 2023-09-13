@@ -8,6 +8,7 @@ ARG TERRAFORM_BINARY_VERSION
 
 RUN apk add --no-cache \
   curl \
+  ansible aws-cli \
   gcompat \
   git \
   idn2-utils \
