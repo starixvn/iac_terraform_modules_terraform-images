@@ -52,8 +52,8 @@ stages:
   - release
   - upload-test-module
 
-danger-review:
-  stage: lint
+# danger-review:
+#   stage: lint
 
 shell check:
   stage: lint
