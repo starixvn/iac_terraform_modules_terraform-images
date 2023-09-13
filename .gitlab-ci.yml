@@ -11,8 +11,12 @@ workflow:
 #       - "/ci/danger-review.yml"
 
 variables:
+  docker_reg_user: "$DOCKER_REG_LOCAL_USERNAME"
+  docker_reg_pass: "$DOCKER_REG_LOCAL_PASSWORD"
+  docker_reg_url: "$DOCKER_REG_LOCAL_URL"
   BASE_IMAGE: "alpine:3.18.3"
-  BUILD_IMAGE_NAME: "$CI_REGISTRY_IMAGE/branches/$CI_COMMIT_REF_SLUG-$TERRAFORM_VERSION:$CI_COMMIT_SHA"
+  IMAGE_PATH: "base/hashicorp"
+  BUILD_IMAGE_NAME: "$DOCKER_REG_URL/$IMAGE_PATH/$CI_COMMIT_REF_SLUG-$TERRAFORM_VERSION:$CI_COMMIT_SHA"
   BUILDX_VERSION: "0.11.2"
   DOCKER_BUILDKIT: "1"
   DOCKER_DIND_IMAGE: "docker:24.0.6-dind"
@@ -103,7 +107,7 @@ build:
     # See https://www.docker.com/blog/multi-platform-docker-builds/
     - docker run --rm --privileged docker/binfmt:a7996909642ee92942dcd6cff44b9b95f08dad64
     # Registry auth
-    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker login -u "$docker_reg_user" -p "$docker_reg_pass" "$docker_reg_url"
   script:
     - docker buildx create --use
     # NOTE: we disable provenance for now
